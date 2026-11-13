@@ -1,4 +1,5 @@
 import type { LocatorTraversalReporter } from '../../protection/diagnostics';
+import type { ProductTrackingRequest } from '../product';
 /**
  * OpenAI-compatible chat completions service for agents.
  *
@@ -297,6 +298,7 @@ type CreateRunAppConfig = Pick<
 >;
 
 type CreateRunFn = (params: {
+  productTrackingRequest?: ProductTrackingRequest;
   agents: unknown[];
   messages: unknown[];
   runId: string;
@@ -638,7 +640,7 @@ export function buildNonStreamingResponse(
  * @param deps - Dependencies for the service
  */
 export async function createAgentChatCompletion(
-  req: Request,
+  req: Request & ProductTrackingRequest,
   res: ServerResponse,
   deps: ChatCompletionDependencies,
 ): Promise<void> {
@@ -898,6 +900,7 @@ export async function createAgentChatCompletion(
        */
       const safeUser: Record<string, unknown> = { ...createSafeUser(reqUser), id: userId };
       const run = await deps.createRun({
+        productTrackingRequest: req,
         agents: [initializedAgent],
         messages,
         runId: requestId,

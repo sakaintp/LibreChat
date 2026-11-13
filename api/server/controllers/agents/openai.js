@@ -1120,6 +1120,7 @@ const executeOpenAIChatCompletion = async (envelope, { req, res }) => {
       const initialSessions = buildInitialToolSessions({ agents: runAgents });
 
       const run = await createRun({
+        productTrackingRequest: req,
         agents: runAgents,
         messages: formattedMessages,
         indexTokenCountMap,

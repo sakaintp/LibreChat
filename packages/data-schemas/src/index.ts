@@ -212,3 +212,4 @@ export * from './postgres/import';
 export * from './postgres/mongo';
 
 export { migrateMCPReservationIndex } from './migrations/mcpReservations';
+export type { AgentBindingState, AgentBindingObserver } from './methods/agent';

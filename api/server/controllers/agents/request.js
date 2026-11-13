@@ -71,6 +71,7 @@ const {
   createDisconnectSnapshotQueue,
   isTemporaryTurn,
   getPreliminaryResponseMessageId,
+  bindProductSubmissionContext,
 } = require('@librechat/api');
 const { disposeClient } = require('~/server/cleanup');
 const {
@@ -829,6 +830,7 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
     );
   }
   const clientRequestId = rawClientRequestId;
+  bindProductSubmissionContext(req, clientRequestId);
   const rawOverrideUserMessageId = req.body?.overrideUserMessageId;
   const rawOverrideConversationId = req.body?.overrideConvoId;
   if (

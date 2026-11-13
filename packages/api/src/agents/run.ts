@@ -59,6 +59,7 @@ import type { ModelBoundChatModelCallback } from '~/middleware/modelBoundContent
 import type { ScheduledMCPPolicyError } from '~/schedules/authorization/policy';
 import type { ScheduleMCPExecution } from '~/schedules/authorization/execution';
 import type { ModelErrorTrackerCallback } from '~/agents/failures/tracker';
+import type { ProductTrackingRequest, ProductChildRuns } from './product';
 import type { ToolInputValidationError } from '~/agents/toolValidation';
 import type { ResolvedToolApprovalHook } from '~/agents/hitl/hooks';
 import type { LangfuseTraceContext } from '~/langfuse/identity';
@@ -82,6 +83,14 @@ import {
   createAttachedCodeEnvironmentPolicyHook,
   resolveAttachedCodeApprovalMode,
 } from '~/agents/hitl/byom';
+import {
+  createProductModelCallback,
+  createProductEventHandlers,
+  createProductRemoteModelHandlers,
+  createProductAgentLifecycle,
+  observeProductRun,
+  observeProductRunSetup,
+} from './product';
 import {
   CHECK_BACKGROUND_TASK_NAME,
   registerBackgroundTaskTool,
@@ -1697,7 +1706,10 @@ type CallbackClientOptions = {
   fallbacks?: FallbackConfig[];
 };
 
-type RunModelCallback = ModelBoundChatModelCallback | ModelErrorTrackerCallback;
+type RunModelCallback =
+  | ModelBoundChatModelCallback
+  | ModelErrorTrackerCallback
+  | CallbackHandlerMethods;
 
 /**
  * Installs run-stable callbacks on the model client itself. Subagent child
@@ -2279,7 +2291,8 @@ function resolveRunTraceContext({
   };
 }
 
-export async function createRun({
+async function buildRun({
+  productTrackingRequest,
   runId,
   signal,
   conversationId,
@@ -2330,6 +2343,7 @@ export async function createRun({
 }: {
   agents: RunAgent[];
   signal: AbortSignal;
+  productTrackingRequest?: ProductTrackingRequest;
   runId?: string;
   /** Conversation-stable identity, used by the e2e run hook to tell a resumed
    *  run apart from a fresh attempt (a resume carries no messages). */
@@ -2486,6 +2500,8 @@ export async function createRun({
   'tokenCounter' | 'customHandlers' | 'indexTokenCountMap' | 'initialSessions'
 >): Promise<Run<IState>> {
   const resolvedRunId = runId ?? randomUUID();
+  const productAgents = createProductAgentLifecycle(productTrackingRequest);
+  const productChildRuns: ProductChildRuns = new Map();
   const registration = resolveSdkAgentBinding(
     agents,
     appConfig?.endpoints?.agents,
@@ -2628,14 +2644,46 @@ export async function createRun({
       { user, tenantId, requestBody, agent: safePrimaryAgent },
       agent,
     );
-    const summarization = modelCallbacks?.length
+    const productContext = {
+      runId: isSubagent ? undefined : resolvedRunId,
+      conversationId: conversationId ?? requestBody?.conversationId,
+      messageId: requestBody?.messageId,
+      agentId: agent.id,
+      model: selfModel,
+      provider: String(provider),
+      usage_type: isSubagent ? ('subagent' as const) : undefined,
+    };
+    const productModelCallback = createProductModelCallback(
+      productTrackingRequest,
+      productContext,
+      signal,
+      isSubagent ? undefined : productAgents,
+      isSubagent ? productChildRuns : undefined,
+    );
+    const agentModelCallbacks = productModelCallback
+      ? [...(modelCallbacks ?? []), productModelCallback]
+      : modelCallbacks;
+    const productSummaryCallback = createProductModelCallback(
+      productTrackingRequest,
+      {
+        ...productContext,
+        usage_type: 'summarization',
+      },
+      signal,
+      isSubagent ? undefined : productAgents,
+      isSubagent ? productChildRuns : undefined,
+    );
+    const summaryModelCallbacks = productSummaryCallback
+      ? [...(modelCallbacks ?? []), productSummaryCallback]
+      : modelCallbacks;
+    const summarization = summaryModelCallbacks?.length
       ? {
           ...shapedSummarization,
           config: {
             ...shapedSummarization.config,
             parameters: withModelCallbacks(
               { ...(shapedSummarization.config.parameters ?? {}) },
-              modelCallbacks,
+              summaryModelCallbacks,
             ),
           },
         }
@@ -2654,7 +2702,7 @@ export async function createRun({
         },
         modelParameters,
       ) as t.RunLLMConfig,
-      modelCallbacks,
+      agentModelCallbacks,
     );
 
     const joinInstructionMap = (map?: Record<string, unknown>) =>
@@ -3217,7 +3265,7 @@ export async function createRun({
     preemption = undefined;
   }
   const toolHandler = customHandlers?.[GraphEvents.ON_TOOL_EXECUTE];
-  const runHandlers =
+  const executionHandlers =
     toolHandler != null && preemption != null && isSteerPreemptSupported()
       ? {
           ...customHandlers,
@@ -3225,11 +3273,31 @@ export async function createRun({
         }
       : customHandlers;
 
+  const productHandlerContext = {
+    runId: resolvedRunId,
+    conversationId: conversationId ?? requestBody?.conversationId,
+    agentId: agents[0]?.id,
+    model: agents[0]?.model_parameters?.model ?? agents[0]?.model ?? undefined,
+    provider: agents[0]?.provider,
+  };
+  const runHandlers = createProductEventHandlers(
+    executionHandlers,
+    productTrackingRequest,
+    productHandlerContext,
+    productChildRuns,
+  );
   const runConfig = {
     runId: resolvedRunId,
     graphConfig,
     tokenCounter,
-    customHandlers: runHandlers,
+    customHandlers: registration?.remote
+      ? createProductRemoteModelHandlers(
+          runHandlers,
+          productTrackingRequest,
+          productHandlerContext,
+          productAgents,
+        )
+      : runHandlers,
     initialSessions,
     calibrationRatio,
     fadingTier,
@@ -3355,5 +3423,34 @@ export async function createRun({
     modelCallbacks,
     conversationId: conversationId ?? requestBody?.conversationId ?? undefined,
   });
-  return run;
+  return observeProductRun(
+    run,
+    productTrackingRequest,
+    {
+      runId: resolvedRunId,
+      conversationId: conversationId ?? requestBody?.conversationId,
+      messageId: requestBody?.messageId,
+      agentId: agents[0]?.id,
+      model: agents[0]?.model_parameters?.model ?? agents[0]?.model ?? undefined,
+      provider: agents[0]?.provider,
+    },
+    signal,
+    productAgents,
+  );
+}
+
+/** Each caller starts setup once; a failure is terminal for that generation. */
+export async function createRun(params: Parameters<typeof buildRun>[0]): Promise<Run<IState>> {
+  const runId = params.runId ?? randomUUID();
+  const context = {
+    runId,
+    conversationId: params.conversationId ?? params.requestBody?.conversationId,
+    messageId: params.requestBody?.messageId,
+    agentId: params.agents[0]?.id,
+    model: params.agents[0]?.model_parameters?.model ?? params.agents[0]?.model ?? undefined,
+    provider: params.agents[0]?.provider,
+  };
+  return observeProductRunSetup(params.productTrackingRequest, context, params.signal, () =>
+    buildRun({ ...params, runId }),
+  );
 }

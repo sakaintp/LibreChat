@@ -21,6 +21,7 @@ import type { ServerRequest } from '~/types';
 import { contentFilterBlockResponse } from '~/middleware/contentFilter';
 import { toLangfusePromptErrorResponse } from '~/langfuse/promptSync';
 import { LangfusePromptRequestError } from '~/langfuse/prompts';
+import { trackRequestProductFact } from '~/tracking/request';
 import { runBounded } from '~/agents/instructions/linked';
 import { formatPromptGroupsResponse } from './format';
 import { getSafeErrorMetadata } from '~/utils';
@@ -395,6 +396,21 @@ export function createPromptHandlers(deps: PromptHandlersDeps): PromptHandlers {
         if (!result.ok) {
           return sendRejection(res, result.error);
         }
+        const created = result.value.prompt;
+        if (created) {
+          const identity = {
+            feature: 'prompts' as const,
+            source: 'native' as const,
+            groupId: created.groupId,
+            promptId: created._id,
+          };
+          trackRequestProductFact(req, { name: 'librechat.prompts.created', ...identity });
+          trackRequestProductFact(req, {
+            name: 'librechat.prompts.deployed',
+            ...identity,
+            deployment: 'initial',
+          });
+        }
         return res.status(200).send(result.value);
       } catch (error) {
         logger.error(error);
@@ -414,6 +430,13 @@ export function createPromptHandlers(deps: PromptHandlersDeps): PromptHandlers {
         if (!result.ok) {
           return sendRejection(res, result.error);
         }
+        trackRequestProductFact(req, {
+          name: 'librechat.prompts.revision.created',
+          feature: 'prompts',
+          source: 'native',
+          groupId: result.value.prompt.groupId,
+          promptId: result.value.prompt._id,
+        });
         return res.status(200).send(result.value);
       } catch (error) {
         logger.error(error);
@@ -455,6 +478,12 @@ export function createPromptHandlers(deps: PromptHandlersDeps): PromptHandlers {
         if (!result.ok) {
           return sendRejection(res, result.error);
         }
+        trackRequestProductFact(req, {
+          name: 'librechat.prompts.metadata.updated',
+          feature: 'prompts',
+          source: 'native',
+          groupId: result.value._id,
+        });
         return res.status(200).send(result.value);
       } catch (error) {
         logger.error(error);
@@ -466,6 +495,13 @@ export function createPromptHandlers(deps: PromptHandlersDeps): PromptHandlers {
     },
 
     async makePromptProduction(req, res) {
+      const deployment = z
+        .enum(['explicit', 'automatic'])
+        .default('explicit')
+        .safeParse(body(req).deployment);
+      if (!deployment.success) {
+        return res.status(400).send({ code: 'invalid_request' });
+      }
       try {
         const result = await service.makePromptProduction({
           promptId: param(req, 'promptId'),
@@ -477,6 +513,16 @@ export function createPromptHandlers(deps: PromptHandlersDeps): PromptHandlers {
         }
         if (result.groupId) {
           await clearLinkedPromptCache(deps, req, result.groupId, []);
+        }
+        if (result.changed && result.groupId) {
+          trackRequestProductFact(req, {
+            name: 'librechat.prompts.deployed',
+            feature: 'prompts',
+            source: 'native',
+            groupId: result.groupId,
+            promptId: param(req, 'promptId'),
+            deployment: deployment.data,
+          });
         }
         return res.status(200).send(result.value);
       } catch (error) {

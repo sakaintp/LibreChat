@@ -37,6 +37,7 @@ import type { ServerRequest, StrategyFunctions } from '~/types';
 import type { SkillDeletionProgress } from './deletion';
 import { extractSkillContent, inspectContentWithTraversal } from '~/protection';
 import { contentFilterBlockResponse } from '~/middleware/contentFilter';
+import { trackRequestProductFact } from '~/tracking/request';
 import { getSafeErrorMetadata } from '~/utils/errors';
 import { getDeploymentSkillIds } from './deployment';
 import { resolveDownloadPath } from '~/storage/path';
@@ -503,6 +504,13 @@ export function createSkillsHandlers(deps: SkillsHandlersDeps): {
 
       // A freshly created skill has no PUBLIC ACL entry, so `isPublic` is
       // always false. Skip the DB round-trip.
+      trackRequestProductFact(req, {
+        name: 'librechat.skills.added',
+        feature: 'skills',
+        skillId: skill._id.toString(),
+        version: skill.version,
+        source: skill.source ?? 'inline',
+      });
       return res
         .status(201)
         .json(attachWarnings(serializeSkill(skill, new Set<string>()), warnings));
@@ -597,6 +605,13 @@ export function createSkillsHandlers(deps: SkillsHandlersDeps): {
         };
         return res.status(409).json(conflict);
       }
+      trackRequestProductFact(req, {
+        name: 'librechat.skills.updated',
+        feature: 'skills',
+        skillId: result.skill._id.toString(),
+        version: result.skill.version,
+        source: result.skill.source ?? 'inline',
+      });
       return res
         .status(200)
         .json(attachWarnings(serializeSkill(result.skill, pub), result.warnings));
@@ -622,6 +637,13 @@ export function createSkillsHandlers(deps: SkillsHandlersDeps): {
         deleted: true,
         cleanupComplete: progress.cleanupComplete,
       };
+      if (progress.removed) {
+        trackRequestProductFact(req, {
+          name: 'librechat.skills.removed',
+          feature: 'skills',
+          skillId: id,
+        });
+      }
       return res.status(200).json(response);
     } catch (error) {
       logger.error('[DELETE /skills/:id] Error deleting skill', getSafeErrorMetadata(error));

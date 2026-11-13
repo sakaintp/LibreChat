@@ -157,11 +157,12 @@ import { BACKGROUND_TOOL_INVOCATION_CONFIG_KEY } from './invocation';
 import { mergeCodeFilesIntoContext } from './codeFilesSession';
 import { toolValidationFeedback } from './validationFeedback';
 import { explainWorkspacePathRejection } from '~/code/paths';
+import { trackRequestProductFact } from '~/tracking/request';
 import { createSkillContentDigest } from './compatibility';
 import { isMissingSandboxPathError } from '~/files/code';
-import { observeToolExecution } from '~/telemetry/tools';
 import { applyHostTextEdits } from './files/processing';
 import { deleteSkillWithRetry } from '~/skills/cleanup';
+import { createProductToolObserver } from './product';
 import { resolveDownloadPath } from '~/storage/path';
 import { parseFrontmatter } from '../skills/import';
 import { HostEditError } from './files/matching';
@@ -3669,6 +3670,13 @@ async function writeSkillMd({
       }
       throw error;
     }
+    trackRequestProductFact(req, {
+      name: 'librechat.skills.added',
+      feature: 'skills',
+      skillId: result.skill._id.toString(),
+      version: result.skill.version,
+      source: 'inline',
+    });
     rememberAuthoredSkill([mergedConfigurable, sourceConfigurable], result.skill);
     options.onSkillAuthored?.({
       name: result.skill.name,
@@ -3739,6 +3747,13 @@ async function writeSkillMd({
     return errorResult(tc, `Skill "${skillName}" not found or not accessible.`);
   }
 
+  if (req)
+    trackRequestProductFact(req, {
+      name: 'librechat.skills.updated',
+      feature: 'skills',
+      skillId: result.skill._id.toString(),
+      version: result.skill.version,
+    });
   const summary = `Updated ${SKILL_FILE_PREFIX}${skillName}/${SKILL_MD} (${content.length} chars).`;
   const surfacedWarnings = surfaceSkillAuthoringWarnings(result.warnings);
   const summaryWithWarnings = `${summary}${surfacedWarnings?.contentSuffix ?? ''}`;
@@ -5894,6 +5909,7 @@ export function createToolExecuteHandler(handlerOptions: ToolExecuteOptions): Ev
             }
             if (mergedConfigurable != null) mergedConfigurable.executionContext = executionContext;
             const telemetryReq = mergedConfigurable?.req as ServerRequest | undefined;
+            const observeToolExecution = createProductToolObserver(telemetryReq);
             const telemetryAncestry =
               executionContext?.ancestry[executionContext.ancestry.length - 1];
             const telemetryConversationId = metadata?.thread_id ?? mergedConfigurable?.thread_id;
@@ -7722,6 +7738,7 @@ export function createToolExecuteHandler(handlerOptions: ToolExecuteOptions): Ev
                           toolMap: eligiblePtcToolMap,
                           toolCallId: tc.id,
                           telemetry: toolTelemetryIdentity(tc, 'programmatic'),
+                          observe: observeToolExecution,
                           signal: runSignal,
                           runId: (metadata as Record<string, unknown>)?.run_id as
                             | string
